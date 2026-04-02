@@ -7,6 +7,8 @@ const {
 } = require("@whiskeysockets/baileys");
 const pino = require("pino");
 const readline = require("readline");
+const { createClient } = require("@supabase/supabase-js");
+const fs = require("fs");
 
 const OWNER_NUMBER = "6285803026940@s.whatsapp.net"; // GANTI PAKE NOMOR WA KAMU (Pake @s.whatsapp.net)
 
@@ -66,8 +68,6 @@ async function startBot() {
 
   // Simpan kredensial setiap kali ada perubahan
   sock.ev.on("creds.update", saveCreds);
-
-  const fs = require("fs");
 
   const APPROVED_GROUPS_FILE = "./database_groups.json";
 
@@ -533,6 +533,32 @@ async function startBot() {
       return await replyWithStyle(`🗑️ Payment *${keyDel}* dihapus.`);
     }
 
+    if (isOwner && command.startsWith("refresh")) {
+      const chatId = msg.key.remoteJid;
+      await sock.sendMessage(
+        chatId,
+        { text: "⏳ *SYNCING...*\n\nNarik data terbaru dari Supabase..." },
+        { quoted: msg },
+      );
+
+      const sukses = await syncCloud("refresh"); // Panggil mode refresh
+
+      if (sukses) {
+        await sock.sendMessage(
+          chatId,
+          { text: "✅ *SYNC DONE!*\n\nDatabase lokal udah diperbarui." },
+          { quoted: msg },
+        );
+      } else {
+        await sock.sendMessage(
+          chatId,
+          { text: "❌ *SYNC FAILED*" },
+          { quoted: msg },
+        );
+      }
+      return;
+    }
+
     // C. AUTO-REPLY PAYMENT
     if (payDB[command]) {
       await sock.sendPresenceUpdate("composing", jid);
@@ -595,4 +621,73 @@ async function startBot() {
   });
 }
 
+// Konfigurasi Supabase
+const supabaseUrl = "https://tedgrclpgqwxilowtnsx.supabase.co"; // Ganti Pake URL lu
+const supabaseKey =
+  "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InRlZGdyY2xwZ3F3eGlsb3d0bnN4Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzMyOTQwMDksImV4cCI6MjA4ODg3MDAwOX0.8ECdMGPC04z4U1e8b8b9G4ryKMc5hymBd2BUAHdexvY"; // Ganti Pake Anon Key lu
+const supabase = createClient(supabaseUrl, supabaseKey);
+
+// Fitur Auto Backup ke Supabase
+// Fitur Auto Backup 4 Database ke Supabase
+const dbFiles = [
+  { namaKey: "db_produk", path: "./database_produk.json" },
+  { namaKey: "db_blacklist", path: "./database_blacklist.json" },
+  { namaKey: "db_payment", path: "./database_payment.json" },
+  { namaKey: "db_groups", path: "./database_groups.json" },
+];
+
+async function syncCloud(type = "backup") {
+  try {
+    if (type === "backup") {
+      // --- LOGIKA UPLOAD (Lokal -> Cloud) ---
+      let gabungan = {};
+      for (let file of dbFiles) {
+        if (fs.existsSync(file.path)) {
+          gabungan[file.namaKey] = JSON.parse(
+            fs.readFileSync(file.path, "utf8"),
+          );
+        }
+      }
+      const { error } = await supabase
+        .from("bot_backups")
+        .insert([{ data_backup: gabungan }]);
+      if (error) throw error;
+      console.log("✅ [CLOUD] Backup Berhasil!");
+      return true;
+    } else if (type === "refresh") {
+      // --- LOGIKA DOWNLOAD (Cloud -> Lokal) ---
+      const { data, error } = await supabase
+        .from("bot_backups")
+        .select("data_backup")
+        .order("created_at", { ascending: false })
+        .limit(1);
+
+      if (error) throw error;
+      if (!data || data.length === 0) return false;
+
+      const cloudData = data[0].data_backup;
+      for (let file of dbFiles) {
+        if (cloudData[file.namaKey]) {
+          fs.writeFileSync(
+            file.path,
+            JSON.stringify(cloudData[file.namaKey], null, 2),
+          );
+        }
+      }
+      console.log("✅ [CLOUD] Refresh Berhasil!");
+      return true;
+    }
+  } catch (e) {
+    console.log(`❌ [CLOUD ERROR] Gagal ${type}:`, e.message);
+    return false;
+  }
+}
+
+// Jalankan backup otomatis tiap 1 jam
+setInterval(
+  () => {
+    syncCloud("backup");
+  },
+  1 * 60 * 60 * 1000,
+);
 startBot();
